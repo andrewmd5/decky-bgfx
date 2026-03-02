@@ -1,57 +1,98 @@
+import glob
+import json
 import os
-
-# The decky plugin module is located at decky-loader/plugin
-# For easy intellisense checkout the decky-loader code repo
-# and add the `decky-loader/plugin/imports` path to `python.analysis.extraPaths` in `.vscode/settings.json`
+import socket
 import decky
-import asyncio
+
 
 class Plugin:
-    # A normal method. It can be called from the TypeScript side using @decky/api.
-    async def add(self, left: int, right: int) -> int:
-        return left + right
+    _sock: socket.socket | None = None
+    _sock_path: str | None = None
 
-    async def long_running(self):
-        await asyncio.sleep(15)
-        # Passing through a bunch of random data, just as an example
-        await decky.emit("timer_event", "Hello from the backend!", True, 2)
-
-    # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
     async def _main(self):
-        self.loop = asyncio.get_event_loop()
-        decky.logger.info("Hello World!")
+        decky.logger.info("BGFX plugin loaded")
 
-    # Function called first during the unload process, utilize this to handle your plugin being stopped, but not
-    # completely removed
     async def _unload(self):
-        decky.logger.info("Goodnight World!")
-        pass
+        self._disconnect()
+        decky.logger.info("BGFX plugin unloaded")
 
-    # Function called after `_unload` during uninstall, utilize this to clean up processes and other remnants of your
-    # plugin that may remain on the system
     async def _uninstall(self):
-        decky.logger.info("Goodbye World!")
-        pass
+        self._disconnect()
 
-    async def start_timer(self):
-        self.loop.create_task(self.long_running())
+    async def is_connected(self) -> bool:
+        if self._sock is None:
+            self._try_connect()
+        if self._sock_path and not os.path.exists(self._sock_path):
+            self._disconnect()
+        return self._sock is not None
 
-    # Migrations that should be performed before entering `_main()`.
-    async def _migration(self):
-        decky.logger.info("Migrating")
-        # Here's a migration example for logs:
-        # - `~/.config/decky-template/template.log` will be migrated to `decky.decky_LOG_DIR/template.log`
-        decky.migrate_logs(os.path.join(decky.DECKY_USER_HOME,
-                                               ".config", "decky-template", "template.log"))
-        # Here's a migration example for settings:
-        # - `~/homebrew/settings/template.json` is migrated to `decky.decky_SETTINGS_DIR/template.json`
-        # - `~/.config/decky-template/` all files and directories under this root are migrated to `decky.decky_SETTINGS_DIR/`
-        decky.migrate_settings(
-            os.path.join(decky.DECKY_HOME, "settings", "template.json"),
-            os.path.join(decky.DECKY_USER_HOME, ".config", "decky-template"))
-        # Here's a migration example for runtime data:
-        # - `~/homebrew/template/` all files and directories under this root are migrated to `decky.decky_RUNTIME_DIR/`
-        # - `~/.local/share/decky-template/` all files and directories under this root are migrated to `decky.decky_RUNTIME_DIR/`
-        decky.migrate_runtime(
-            os.path.join(decky.DECKY_HOME, "template"),
-            os.path.join(decky.DECKY_USER_HOME, ".local", "share", "decky-template"))
+    async def get_presets(self) -> dict:
+        return self._send({"cmd": "presets"})
+
+    async def get_active(self) -> dict:
+        return self._send({"cmd": "active"})
+
+    async def activate_preset(self, index: int) -> dict:
+        return self._send({"cmd": "activate", "index": index})
+
+    async def set_param(self, effect: int, name: str, value: float) -> dict:
+        return self._send({"cmd": "set_param", "effect": effect, "name": name, "value": value})
+
+    async def set_texture(self, effect: int, name: str, value: str) -> dict:
+        return self._send({"cmd": "set_texture", "effect": effect, "name": name, "value": value})
+
+    async def set_scaling(self, effect: int, value: str) -> dict:
+        return self._send({"cmd": "set_scaling", "effect": effect, "value": value})
+
+    async def save_preset(self) -> dict:
+        return self._send({"cmd": "save"})
+
+    def _send(self, cmd: dict) -> dict:
+        if self._sock is None:
+            self._try_connect()
+        if self._sock is None:
+            return {"ok": False, "error": "not connected"}
+        try:
+            payload = json.dumps(cmd) + "\n"
+            self._sock.sendall(payload.encode("utf-8"))
+            return self._read_response()
+        except (OSError, json.JSONDecodeError) as e:
+            decky.logger.warning(f"IPC send failed: {e}")
+            self._disconnect()
+            return {"ok": False, "error": str(e)}
+
+    def _read_response(self) -> dict:
+        buf = b""
+        while True:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise OSError("connection closed")
+            buf += chunk
+            if b"\n" in buf:
+                return json.loads(buf[: buf.index(b"\n")])
+
+    def _try_connect(self):
+        paths = glob.glob("/tmp/bgfx-overlay-*.sock")
+        if not paths:
+            return
+        paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        sock_path = paths[0]
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect(sock_path)
+            self._sock = s
+            self._sock_path = sock_path
+            decky.logger.info(f"Connected to {sock_path}")
+        except OSError as e:
+            decky.logger.warning(f"Failed to connect to {sock_path}: {e}")
+            self._sock = None
+
+    def _disconnect(self):
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+            self._sock_path = None
