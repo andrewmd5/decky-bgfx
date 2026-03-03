@@ -20,27 +20,31 @@ Requires **Borderless Gaming v1.4.3** or higher with the BGFX Vulkan layer activ
 
 ```bash
 pnpm install
-pnpm build
 ```
+
+Build and create a release zip:
+
+```bash
+# Linux / macOS
+./build.sh
+
+# Windows (PowerShell)
+.\build.ps1
+```
+
+The zip is written to `out/BGFX.zip`.
 
 ## Install on Steam Deck
 
 ### From zip
 
-1. Build the plugin
-2. Create the zip:
-   ```bash
-   mkdir -p out/BGFX/dist
-   cp dist/index.js out/BGFX/dist/
-   cp main.py package.json plugin.json out/BGFX/
-   cd out && zip -r BGFX.zip BGFX/
-   ```
-3. Transfer `BGFX.zip` to your Steam Deck
-4. Install via Decky Loader > Settings > Developer > Install Plugin From ZIP
+1. Build the plugin (see above)
+2. Transfer `out/BGFX.zip` to your Steam Deck
+3. Install via Decky Loader > Settings > Developer > Install Plugin From ZIP
 
 ### Manual
 
-1. Copy the `BGFX/` folder to `~/homebrew/plugins/` on your Steam Deck
+1. Copy the `out/BGFX/` folder to `~/homebrew/plugins/` on your Steam Deck
 2. Restart Decky Loader
 
 ## Usage
