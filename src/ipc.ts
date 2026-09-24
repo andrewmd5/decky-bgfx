@@ -47,12 +47,12 @@ interface ViewState {
   sessions: Session[];
   error: string;
   notice: string;
-  busy: boolean;
   connecting: boolean;
+  connected: boolean;
 }
 
 class SessionStore {
-  private view: ViewState = { data: null, sessions: [], error: "", notice: "", busy: false, connecting: true };
+  private view: ViewState = { data: null, sessions: [], error: "", notice: "", connecting: true, connected: false };
   private listeners = new Set<() => void>();
   private users = 0;
   private timer?: ReturnType<typeof setTimeout>;
@@ -62,6 +62,7 @@ class SessionStore {
   private stopped = false;
   private watchGeneration = 0;
   private connectionError = false;
+  private pendingValues = new Map<string, { edit: Edit; result: Promise<boolean> }>();
   snapshot = () => this.view;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -82,16 +83,16 @@ class SessionStore {
       const data = await getState(this.selected);
       if (!data.ok) {
         this.connectionError = true;
-        this.update({ data: null, sessions: data.sessions ?? [], error: data.error ?? "Connection unavailable.", connecting: false });
+        this.update({ data: null, sessions: data.sessions ?? [], error: data.error ?? "Connection unavailable.", connecting: false, connected: false });
         return;
       }
       this.selected = data.session;
-      this.update({ data, sessions: data.sessions, connecting: false,
+      this.update({ data, sessions: data.sessions, connecting: false, connected: true,
         ...(this.connectionError ? { error: "" } : {}) });
       this.connectionError = false;
     } catch (error) {
       this.connectionError = true;
-      this.update({ data: null, error: String(error), connecting: false });
+      this.update({ error: String(error), connecting: false, connected: false });
     }
   }
   refresh = async () => {
@@ -100,33 +101,58 @@ class SessionStore {
     try { await this.enqueue(() => this.read()); }
     finally { this.refreshing = false; }
   };
-  select = (session: string | null) => this.enqueue(async () => {
-    this.selected = session;
-    this.update({ data: null, error: "", notice: "", connecting: true });
-    await this.read();
-  });
-  edit = (target: Target, edits: Edit[], notice = "") =>
-    this.enqueue(async (): Promise<boolean> => {
-      const data = this.view.data;
-      if (!data || data.session !== target.session || data.active?.token !== target.preset) {
-        this.update({ error: "Game or preset changed. Reopen its controls." });
-        return false;
-      }
-      this.update({ busy: true, error: "", notice: "" });
-      try {
-        for (const edit of edits) {
-          const result = await command(target.session, target.preset, edit.cmd, edit.args ?? {});
-          if (!result.ok) throw new Error(result.error ?? "The game did not apply the change.");
-        }
-        this.update({ notice });
-        await this.read();
-        return true;
-      } catch (error) {
-        this.update({ error: error instanceof Error ? error.message : String(error) });
-        await this.read();
-        return false;
-      } finally { this.update({ busy: false }); }
+  select = (session: string | null) => {
+    this.pendingValues.clear();
+    return this.enqueue(async () => {
+      this.selected = session;
+      this.update({ data: null, error: "", notice: "", connecting: true, connected: false });
+      await this.read();
     });
+  };
+  setValue = (target: Target, edit: Edit): Promise<boolean> => {
+    const key = JSON.stringify([target.session, target.preset, edit.cmd, edit.args?.effect, edit.args?.name]);
+    const existing = this.pendingValues.get(key);
+    if (existing) {
+      existing.edit = edit;
+      return existing.result;
+    }
+    const pending: { edit: Edit; result: Promise<boolean> } = {
+      edit,
+      result: this.enqueue(() => {
+        if (this.pendingValues.get(key) === pending) this.pendingValues.delete(key);
+        return this.applyEdits(target, [pending.edit]);
+      }),
+    };
+    this.pendingValues.set(key, pending);
+    return pending.result;
+  };
+  edit = (target: Target, edits: Edit[], notice = "") => {
+    this.pendingValues.clear();
+    return this.enqueue(() => this.applyEdits(target, edits, notice));
+  };
+  private async applyEdits(target: Target, edits: Edit[], notice = ""): Promise<boolean> {
+    const data = this.view.data;
+    if (this.stopped || !this.view.connected) return false;
+    if (!data || data.session !== target.session || (data.active?.token ?? 0) !== target.preset) {
+      this.update({ error: "Game or preset changed. Reopen its controls." });
+      return false;
+    }
+    if (edits.length === 0) return true;
+    this.update({ error: "", notice: "" });
+    try {
+      for (const edit of edits) {
+        const result = await command(target.session, target.preset, edit.cmd, edit.args ?? {});
+        if (!result.ok) throw new Error(result.error ?? "The game did not apply the change.");
+      }
+      this.update({ notice });
+      await this.read();
+      return true;
+    } catch (error) {
+      this.update({ error: error instanceof Error ? error.message : String(error) });
+      await this.read();
+      return false;
+    }
+  }
   watch() {
     this.users++;
     if (this.users === 1) {
@@ -146,6 +172,7 @@ class SessionStore {
   dispose() {
     this.stopped = true;
     clearTimeout(this.timer);
+    this.pendingValues.clear();
     this.listeners.clear();
   }
 }

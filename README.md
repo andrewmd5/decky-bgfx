@@ -5,7 +5,7 @@ Control Borderless Gaming effects from Steam Deck's Quick Access Menu.
 Requires **Borderless Gaming 1.4.15+** and Decky Loader. Enable the game's BGFX profile in Holo and restart the game first.
 
 - Live source/generated FPS and layer status
-- Preset selection and effect controls
+- Preset selection and inline controls for every effect
 - Labeled BGFG multiplier and quality settings
 - Split comparison and optional persistent FPS
 - Save presets and copy session diagnostics
