@@ -5,9 +5,13 @@ $out = Join-Path $root "out"
 $pkg = Join-Path $out $name
 
 pnpm --dir $root build
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Remove-Item -Recurse -Force $pkg -ErrorAction SilentlyContinue
-Remove-Item -Force (Join-Path $out "$name.zip") -ErrorAction SilentlyContinue
+$expected = [IO.Path]::GetFullPath((Join-Path $root "out/BGFX"))
+if ([IO.Path]::GetFullPath($pkg) -ne $expected) { throw "Unexpected package directory" }
+if (Test-Path -LiteralPath $pkg) { Remove-Item -LiteralPath $pkg -Recurse -Force }
+$archive = Join-Path $out "$name.zip"
+if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
 
 New-Item -ItemType Directory -Path (Join-Path $pkg "dist") -Force | Out-Null
 Copy-Item (Join-Path $root "dist\index.js") (Join-Path $pkg "dist\index.js")

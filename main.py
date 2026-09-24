@@ -1,98 +1,128 @@
+import asyncio
 import glob
 import json
 import os
-import socket
+import re
+import time
+
 import decky
+
+PROTOCOL = 2
+MAX_RESPONSE_BYTES = 512 * 1024
+COMMAND_TIMEOUT = 3.0
+DISCOVERY_INTERVAL = 3.0
 
 
 class Plugin:
-    _sock: socket.socket | None = None
-    _sock_path: str | None = None
-
     async def _main(self):
+        self._lock = asyncio.Lock()
+        self._sessions = {}
+        self._last_discovery = 0.0
+        self._closed = False
         decky.logger.info("BGFX plugin loaded")
 
     async def _unload(self):
-        self._disconnect()
-        decky.logger.info("BGFX plugin unloaded")
+        self._closed = True
+        self._sessions.clear()
 
     async def _uninstall(self):
-        self._disconnect()
+        await self._unload()
 
-    async def is_connected(self) -> bool:
-        if self._sock is None:
-            self._try_connect()
-        if self._sock_path and not os.path.exists(self._sock_path):
-            self._disconnect()
-        return self._sock is not None
-
-    async def get_presets(self) -> dict:
-        return self._send({"cmd": "presets"})
-
-    async def get_active(self) -> dict:
-        return self._send({"cmd": "active"})
-
-    async def activate_preset(self, index: int) -> dict:
-        return self._send({"cmd": "activate", "index": index})
-
-    async def set_param(self, effect: int, name: str, value: float) -> dict:
-        return self._send({"cmd": "set_param", "effect": effect, "name": name, "value": value})
-
-    async def set_texture(self, effect: int, name: str, value: str) -> dict:
-        return self._send({"cmd": "set_texture", "effect": effect, "name": name, "value": value})
-
-    async def set_scaling(self, effect: int, value: str) -> dict:
-        return self._send({"cmd": "set_scaling", "effect": effect, "value": value})
-
-    async def save_preset(self) -> dict:
-        return self._send({"cmd": "save"})
-
-    def _send(self, cmd: dict) -> dict:
-        if self._sock is None:
-            self._try_connect()
-        if self._sock is None:
-            return {"ok": False, "error": "not connected"}
-        try:
-            payload = json.dumps(cmd) + "\n"
-            self._sock.sendall(payload.encode("utf-8"))
-            return self._read_response()
-        except (OSError, json.JSONDecodeError) as e:
-            decky.logger.warning(f"IPC send failed: {e}")
-            self._disconnect()
-            return {"ok": False, "error": str(e)}
-
-    def _read_response(self) -> dict:
-        buf = b""
-        while True:
-            chunk = self._sock.recv(4096)
-            if not chunk:
-                raise OSError("connection closed")
-            buf += chunk
-            if b"\n" in buf:
-                return json.loads(buf[: buf.index(b"\n")])
-
-    def _try_connect(self):
-        paths = glob.glob("/tmp/bgfx-overlay-*.sock")
-        if not paths:
-            return
-        paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-        sock_path = paths[0]
-        try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(2.0)
-            s.connect(sock_path)
-            self._sock = s
-            self._sock_path = sock_path
-            decky.logger.info(f"Connected to {sock_path}")
-        except OSError as e:
-            decky.logger.warning(f"Failed to connect to {sock_path}: {e}")
-            self._sock = None
-
-    def _disconnect(self):
-        if self._sock is not None:
+    async def _exchange(self, path: str, request: dict, timeout=COMMAND_TIMEOUT) -> dict:
+        async with asyncio.timeout(timeout):
+            reader, writer = await asyncio.open_unix_connection(
+                path, limit=MAX_RESPONSE_BYTES
+            )
             try:
-                self._sock.close()
+                payload = (json.dumps(request, allow_nan=False) + "\n").encode()
+                if len(payload) > 4096:
+                    raise ValueError("Control request exceeds the layer's size limit.")
+                writer.write(payload)
+                await writer.drain()
+                line = await reader.readline()
+                if not line.endswith(b"\n"):
+                    raise OSError("The game closed the connection.")
+                result = json.loads(line)
+                if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+                    raise ValueError("Invalid response from the BGFX layer.")
+                return result
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+    async def _discover(self):
+        self._last_discovery = time.monotonic()
+        candidates = []
+        for path in glob.glob("/tmp/bgfx-overlay-*.sock"):
+            match = re.fullmatch(r"bgfx-overlay-(\d+)(?:-[0-9a-f]+)?\.sock", os.path.basename(path))
+            if match is None or not os.path.isdir(f"/proc/{match[1]}"):
+                continue
+            try:
+                candidates.append((os.stat(path).st_mtime_ns, path))
             except OSError:
-                pass
-            self._sock = None
-            self._sock_path = None
+                continue
+        candidates.sort(reverse=True)
+        gate = asyncio.Semaphore(4)
+
+        async def probe(path):
+            async with gate:
+                try:
+                    result = await self._exchange(path, {"cmd": "state"}, timeout=0.75)
+                    if result.get("ok") and result.get("protocol") == PROTOCOL:
+                        return result["session"], (path, {
+                            key: result.get(key) for key in ("session", "pid", "app_id")
+                        })
+                except (OSError, ValueError, TimeoutError, KeyError):
+                    pass
+                return None
+
+        results = await asyncio.gather(*(probe(path) for _, path in candidates[:32]))
+        self._sessions = dict(result for result in results if result is not None)
+        return bool(candidates)
+
+    async def get_state(self, session: str | None = None) -> dict:
+        async with self._lock:
+            if self._closed:
+                return {"ok": False, "error": "Plugin is stopping.", "sessions": []}
+            saw_sockets = bool(self._sessions)
+            if time.monotonic() - self._last_discovery >= DISCOVERY_INTERVAL:
+                saw_sockets = await self._discover()
+            sessions = [info for _, info in self._sessions.values()]
+            if not self._sessions:
+                return {
+                    "ok": False, "sessions": [],
+                    "error": ("No compatible BGFX session responded. Update Borderless Gaming and restart the game."
+                              if saw_sockets else "No BGFX game session detected."),
+                }
+            if session is None:
+                session = next(iter(self._sessions))
+            entry = self._sessions.get(session)
+            if entry is None:
+                return {"ok": False, "sessions": sessions,
+                        "error": "This game session ended. Select a running session."}
+            try:
+                result = await self._exchange(entry[0], {"cmd": "state"})
+                if result.get("session") != session or result.get("protocol") != PROTOCOL:
+                    raise ValueError("The game session changed. Reopen its controls.")
+                result["sessions"] = sessions
+                result["stale"] = time.time() * 1000 - result["updated_at"] > 3000
+                return result
+            except (OSError, ValueError, TimeoutError, KeyError) as error:
+                self._sessions.pop(session, None)
+                return {"ok": False, "sessions": sessions,
+                        "error": str(error) or "The game is not responding."}
+
+    async def command(self, session: str, preset: int, cmd: str,
+                      args: dict | None = None) -> dict:
+        if cmd not in {"activate", "set_param", "set_texture", "set_scaling", "set_hud", "save"}:
+            return {"ok": False, "error": "Unsupported command."}
+        async with self._lock:
+            entry = self._sessions.get(session)
+            if self._closed or entry is None:
+                return {"ok": False, "error": "Game session ended. Refresh before editing."}
+            request = {**(args or {}), "cmd": cmd, "session": session, "preset": preset}
+            try:
+                return await self._exchange(entry[0], request)
+            except (OSError, ValueError, TimeoutError) as error:
+                return {"ok": False, "error": str(error) or
+                        "The game did not confirm the change. Resume it and refresh before retrying."}

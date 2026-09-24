@@ -1,10 +1,10 @@
 {
   "name": "BGFX",
   "author": "Borderless Gaming",
-  "flags": ["_root"],
+  "flags": [],
   "api_version": 1,
   "publish": {
     "tags": ["gaming", "effects", "shaders"],
-    "description": "Control BGFX layers from the Quick Access Menu."
+    "description": "Control BGFX effects and frame generation from Quick Access, with live status and FPS."
   }
 }

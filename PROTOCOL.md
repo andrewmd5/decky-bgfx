@@ -1,130 +1,57 @@
-# BGFX IPC Protocol
+# BGFX IPC v2
 
-The BGFX Vulkan layer exposes a Unix domain socket for external control. The Decky plugin uses this to read and modify shader presets and parameters while a game is running.
+Requires Borderless Gaming 1.4.15+. Unix sockets are discovered at
+`/tmp/bgfx-overlay-{pid}-{session}.sock`. Each renderer has its own session ID;
+the socket is readable/writable only by the game user (and root).
 
-## Connection
+Requests and responses are newline-delimited JSON. Requests are limited to
+4096 bytes including the newline. Every response has `ok`; failures include
+an `error` string.
 
-Each game process creates a socket at `/tmp/bgfx-overlay-{pid}.sock`. The PID is also written to `/tmp/bgfx-overlay.pid` with `DeleteOnClose` semantics, so it disappears when the process exits.
-
-To connect:
-
-```python
-import socket, glob
-
-paths = glob.glob("/tmp/bgfx-overlay-*.sock")
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(paths[0])
-```
-
-## Message format
-
-Newline-delimited JSON. Each request is a single JSON object followed by `\n`. Each response is a single JSON object followed by `\n`.
-
-Every response includes `"ok": true` on success or `"ok": false, "error": "message"` on failure.
-
-## Commands
-
-### presets
-
-List all available presets.
-
-```
-→ {"cmd":"presets"}
-← {"ok":true,"presets":[{"name":"CRT","index":0,"chain_count":2,"is_favorite":false},{"name":"Clean","index":1,"chain_count":1,"is_favorite":true}]}
-```
-
-### active
-
-Get the currently active preset with its full effect chain and parameters.
-
-```
-→ {"cmd":"active"}
-← {"ok":true,"index":0,"name":"CRT","effects":[
-     {"name":"CRT_Lottes","scaling":"auto","params":[
-       {"name":"hardScan","label":"Hard Scan","type":"float","value":-8.0,"min":-20.0,"max":0.0,"step":0.1,"default":-8.0},
-       {"name":"enabled","label":"Enabled","type":"bool","value":1.0,"min":0.0,"max":1.0,"step":1.0,"default":1.0},
-       {"name":"lut","label":"LUT","type":"texture","value":"/path/to/lut.png","default":""}
-     ]}
-   ]}
-```
-
-Parameter types:
-- `float` / `int` / `bool` have numeric `value`, `min`, `max`, `step`, `default`
-- `texture` has string `value` and `default`
-
-Scaling values: `auto`, `integer`, `fit`, `stretch`, `fill`
-
-### activate
-
-Switch to a preset by index.
-
-```
-→ {"cmd":"activate","index":1}
-← {"ok":true}
-```
-
-### set_param
-
-Change a numeric parameter on an effect in the active preset. `effect` is the zero-based index into the effect chain.
-
-```
-→ {"cmd":"set_param","effect":0,"name":"hardScan","value":-12.0}
-← {"ok":true}
-```
-
-Changes apply on the next frame. The parameter name is case-insensitive.
-
-### set_texture
-
-Change a texture parameter.
-
-```
-→ {"cmd":"set_texture","effect":0,"name":"lut","value":"/path/to/new_lut.png"}
-← {"ok":true}
-```
-
-### set_scaling
-
-Change the scaling type for an effect in the chain.
-
-```
-→ {"cmd":"set_scaling","effect":0,"value":"integer"}
-← {"ok":true}
-```
-
-Valid values: `auto`, `integer`, `fit`, `stretch`, `fill`
-
-### save
-
-Persist the current preset's parameters and scaling types to disk.
-
-```
-→ {"cmd":"save"}
-← {"ok":true}
-```
-
-## Errors
-
-All commands return the same error shape:
+## Read state
 
 ```json
-{"ok":false,"error":"no active preset"}
+{"cmd":"state"}
 ```
 
-Common errors:
-- `not connected` — no socket found
-- `no active preset` — no preset is loaded
-- `index N out of range` — preset or effect index is invalid
-- `parameter 'X' not found` — no parameter with that name on the effect
-- `unknown scaling type: X` — invalid scaling value
-- `unknown command: X` — unrecognized cmd value
+Returns one snapshot containing:
 
-## Testing
+- `protocol`, `session`, `pid`, `app_id`, `updated_at` (Unix milliseconds)
+- `presets`: index, name, description, favorite flag, chain count
+- `active`: preset token/index/name, `show_hud`, effects and parameters
+- `requested_preset`: pending preset name, or null
+- `status`: state/reason, multiplier, frame rates, failed presents, resolution, compilation progress
 
-You can test the socket directly with socat:
+States: `compiling`, `error`, `waiting`, `generating`, `active`, `passthrough`.
+Frame rates count source arrivals and successful generated/total present submissions,
+not display scanout. The timestamp stops advancing if the game stops presenting.
 
-```bash
-echo '{"cmd":"presets"}' | socat - UNIX-CONNECT:/tmp/bgfx-overlay-*.sock
-echo '{"cmd":"active"}' | socat - UNIX-CONNECT:/tmp/bgfx-overlay-*.sock
-echo '{"cmd":"set_param","effect":0,"name":"hardScan","value":-12.0}' | socat - UNIX-CONNECT:/tmp/bgfx-overlay-*.sock
+Effects include `can_scale`, `scaling`, and `multiplier_parameter`. Numeric parameters
+include value, default, min, max, step, and optional `labels` in step order.
+Texture parameters use string value/default fields.
+
+## Change state
+
+Every mutation includes the returned `session` and active `preset` token.
+Never replay an edit against a newly discovered session.
+
+```json
+{"cmd":"activate","session":"…","preset":1,"index":2}
+{"cmd":"set_param","session":"…","preset":1,"effect":0,"name":"factor","value":2}
+{"cmd":"set_texture","session":"…","preset":1,"effect":1,"name":"lut","value":"/path/lut.png"}
+{"cmd":"set_scaling","session":"…","preset":1,"effect":1,"value":"fit"}
+{"cmd":"set_hud","session":"…","preset":1,"value":true}
+{"cmd":"save","session":"…","preset":1}
 ```
+
+Scaling: `auto`, `integer`, `fit`, `stretch`, `fill`.
+`set_hud` enables persistent frame-generation FPS; its default is false.
+
+Edits are validated and acknowledged at a source-frame boundary. Activation
+acknowledges the request; poll state for preparation or errors. Commands that
+expire before execution are discarded. A timeout after execution starts is
+indeterminate: refresh before retrying. Save writes an atomic snapshot off the
+presentation thread, retaining the shipped filename for user overrides.
+
+The plugin serializes requests, bounds socket waits/responses, and does not
+automatically retry writes. A paused game may need to resume before accepting edits.

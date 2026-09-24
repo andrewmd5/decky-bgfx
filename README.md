@@ -1,61 +1,41 @@
-# BGFX - Decky Loader Plugin
+# BGFX for Decky
 
-Control [Borderless Gaming](https://store.steampowered.com/app/388080/Borderless_Gaming/) shader effects from the Steam Deck Quick Access Menu.
+Control Borderless Gaming effects from Steam Deck's Quick Access Menu.
 
-Requires **Borderless Gaming v1.4.3** or higher with the BGFX Vulkan layer active.
+Requires **Borderless Gaming 1.4.15+** and Decky Loader. Enable the game's BGFX profile in Holo and restart the game first.
 
-## Features
+- Live source/generated FPS and layer status
+- Preset selection and effect controls
+- Labeled BGFG multiplier and quality settings
+- Split comparison and optional persistent FPS
+- Save presets and copy session diagnostics
 
-- Select and switch presets
-- Adjust effect parameters in real time
-- Change per-effect scaling type
-- Save preset changes
+## Install
 
-## Requirements
+Download `BGFX.zip` from [Releases](https://github.com/andrewmd5/decky-bgfx/releases/latest), then install it through Decky's **Install Plugin from ZIP** option.
 
-- [Decky Loader](https://decky.xyz/) installed on your Steam Deck
-- Node.js v16.14+ and pnpm v9+ for building from source
+## Build
 
-## Building
+Node.js 22 and pnpm 10.30.3:
 
-```bash
-pnpm install
+```sh
+pnpm install --frozen-lockfile
+pnpm check
+bash build.sh
 ```
 
-Build and create a release zip:
+On Windows, use `./build.ps1` instead. Both produce `out/BGFX.zip`.
 
-```bash
-# Linux / macOS
-./build.sh
+## Release
 
-# Windows (PowerShell)
-.\build.ps1
-```
+CI checks and packages every push to main and every pull request. To publish:
 
-The zip is written to `out/BGFX.zip`.
+1. Update `package.json`'s version on main.
+2. Commit and push.
+3. Push the matching `vX.Y.Z` tag.
 
-## Install on Steam Deck
-
-### From zip
-
-1. Build the plugin (see above)
-2. Transfer `out/BGFX.zip` to your Steam Deck
-3. Install via Decky Loader > Settings > Developer > Install Plugin From ZIP
-
-### Manual
-
-1. Copy the `out/BGFX/` folder to `~/homebrew/plugins/` on your Steam Deck
-2. Restart Decky Loader
-
-## Usage
-
-1. Launch a game with the BGFX Vulkan layer enabled
-2. Open the Quick Access Menu
-3. Navigate to the BGFX plugin tab
-4. Select a preset from the dropdown
-5. Tap an effect to open its settings
-6. Tap "Save Preset" to persist changes
+The tag workflow checks the version and main ancestry, builds the archive, and publishes a GitHub release with `BGFX.zip` and `SHA256SUMS`.
 
 ## License
 
-BSD-3-Clause
+BSD-3-Clause.
