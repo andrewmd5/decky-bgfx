@@ -53,10 +53,10 @@ function Content() {
   return <>
     <PanelSection title="Borderless Gaming">
       {view.sessions.length > 1 && <PanelSectionRow>
-        <DropdownItem label="Game session" selectedOption={data?.session}
+        <DropdownItem label="Game" selectedOption={data?.game}
           strDefaultLabel="Select a running game"
           rgOptions={view.sessions.map(session => ({
-            data: session.session, label: `${session.app_id ? `App ${session.app_id}` : "Game"} · PID ${session.pid}`,
+            data: session.game, label: `${session.app_id ? `App ${session.app_id}` : "Game"} · PID ${session.pid}`,
           }))} onChange={option => void store.select(option.data)} />
       </PanelSectionRow>}
       {!data ? <>
@@ -88,11 +88,11 @@ function Content() {
           onChange={option => void store.edit(target, [{ cmd: "activate", args: { index: option.data } }])} />
         </PanelSectionRow>
         {active && <PanelSectionRow>
-          <HudControl key={`${data.session}:${active.token}`} value={active.show_hud} target={target} disabled={blocked} />
+          <HudControl key={`${data.game}:${active.name}`} value={active.show_hud} target={target} disabled={blocked} />
         </PanelSectionRow>}
       </PanelSection>
       {active?.effects.map((effect, index) => <EffectControls
-        key={`${data.session}:${active.token}:${index}:${effect.name}`}
+        key={`${data.game}:${active.name}:${index}:${effect.name}`}
         effect={effect} index={index} target={target} disabled={blocked} />)}
       <PanelSection>
         <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !active}

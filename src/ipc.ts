@@ -20,10 +20,11 @@ export interface EffectEntry {
   multiplier_parameter?: string;
   params: Parameter[];
 }
-export interface Session { session: string; pid: number; app_id?: string }
+export interface Session { game: string; session: string; pid: number; app_id?: string }
 export interface State extends Result, Session {
   protocol: number;
   stale: boolean;
+  reconnecting?: boolean;
   updated_at: number;
   sessions: Session[];
   requested_preset?: string;
@@ -39,7 +40,7 @@ export interface State extends Result, Session {
 export interface Target { session: string; preset: number }
 export interface Edit { cmd: string; args?: Record<string, unknown> }
 export const targetOf = (state: State): Target => ({ session: state.session, preset: state.active?.token ?? 0 });
-const getState = callable<[session: string | null], State>("get_state");
+const getState = callable<[game: string | null], State>("get_state");
 const command = callable<[session: string, preset: number, cmd: string, args: Record<string, unknown>], Result>("command");
 
 interface ViewState {
@@ -83,16 +84,20 @@ class SessionStore {
       const data = await getState(this.selected);
       if (!data.ok) {
         this.connectionError = true;
-        this.update({ data: null, sessions: data.sessions ?? [], error: data.error ?? "Connection unavailable.", connecting: false, connected: false });
+        if (!data.reconnecting) this.selected = null;
+        this.update({ data: data.reconnecting ? this.view.data : null,
+          sessions: data.sessions ?? [], error: data.error ?? "Connection unavailable.",
+          connecting: !!data.reconnecting, connected: false });
         return;
       }
-      this.selected = data.session;
+      if (data.session !== this.view.data?.session) this.pendingValues.clear();
+      this.selected = data.game;
       this.update({ data, sessions: data.sessions, connecting: false, connected: true,
         ...(this.connectionError ? { error: "" } : {}) });
       this.connectionError = false;
     } catch (error) {
       this.connectionError = true;
-      this.update({ error: String(error), connecting: false, connected: false });
+      this.update({ error: String(error), connecting: true, connected: false });
     }
   }
   refresh = async () => {
@@ -101,10 +106,10 @@ class SessionStore {
     try { await this.enqueue(() => this.read()); }
     finally { this.refreshing = false; }
   };
-  select = (session: string | null) => {
+  select = (game: string | null) => {
     this.pendingValues.clear();
     return this.enqueue(async () => {
-      this.selected = session;
+      this.selected = game;
       this.update({ data: null, error: "", notice: "", connecting: true, connected: false });
       await this.read();
     });
