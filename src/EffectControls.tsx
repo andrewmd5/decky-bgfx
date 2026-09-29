@@ -32,13 +32,13 @@ function ParameterControl({ param, index, target, disabled }: {
   const [value, change] = useLiveValue(Number(param.value), value =>
     store.setValue(target, { cmd: "set_param", args: { effect: index, name: param.name, value } }), disabled);
   if (param.type === "bool")
-    return <ToggleField label={param.label} checked={value > 0.5} disabled={disabled}
+    return <ToggleField label={param.label} description={param.description} checked={value > 0.5} disabled={disabled}
       onChange={checked => change(checked ? 1 : 0)} />;
   if (param.labels?.length)
-    return <DropdownItem label={param.label} rgOptions={labeledOptions(param)}
+    return <DropdownItem label={param.label} description={param.description} rgOptions={labeledOptions(param)}
       selectedOption={value} disabled={disabled} onChange={option => change(option.data)} />;
-  return <SliderField label={param.label} value={value} min={param.min} max={param.max}
-    step={param.step} resetValue={Number(param.default)} validValues="steps" showValue
+  return <SliderField label={param.label} description={param.description} value={value} min={param.min} max={param.max}
+    step={param.step} resetValue={Number(param.default)} validValues="steps" showValue editableValue
     disabled={disabled} onChange={change} />;
 }
 
