@@ -1,12 +1,12 @@
-# BGFX IPC v2
+# BGFX IPC v4
 
-Requires Borderless Gaming 1.4.15+. Unix sockets are discovered at
+Requires a BGFX build with IPC v4. Unix sockets are discovered at
 `/tmp/bgfx-overlay-{pid}-{session}.sock`. Each renderer has its own session ID;
 the socket is readable/writable only by the game user (and root).
 
 Requests and responses are newline-delimited JSON. Requests are limited to
 4096 bytes including the newline. Every response has `ok`; failures include
-an `error` string.
+an `error` string or a structured `compatibility` rejection.
 
 ## Read state
 
@@ -17,8 +17,9 @@ an `error` string.
 Returns one snapshot containing:
 
 - `protocol`, `session`, `pid`, `app_id`, `updated_at` (Unix milliseconds)
-- `presets`: index, name, description, favorite flag, chain count
-- `active`: preset token/index/name, `show_hud`, effects and parameters
+- `presets`: index, name, description, favorite flag, chain count, compatibility
+- `active`: preset token/index/name, `show_hud`, effects, parameters, compatibility
+- `compatibility_adapter`: name of the GPU used for compatibility checks
 - `requested_preset`: pending preset name, or null
 - `status`: state/reason, multiplier, frame rates, failed presents, resolution, compilation progress
 
@@ -29,6 +30,17 @@ not display scanout. The timestamp stops advancing if the game stops presenting.
 Effects include `can_scale`, `scaling`, and `multiplier_parameter`. Numeric parameters
 include value, default, min, max, step, and optional `labels` in step order.
 Texture parameters use string value/default fields.
+
+Each preset's `compatibility` contains `status`, `effect` and `diagnostic`. Status is
+the BGFX `EffectCompatibilityStatus`: `Checking`, `Supported`, `PreparationRequired`,
+`UnsupportedHardware`, `ProviderNotInstalled`, `ProviderUnavailable`, `EffectNotInstalled`
+or `CheckFailed`. Checks run
+off the render thread when controls are opened, using the game's Vulkan capabilities.
+Results are cached until the effect catalog changes; checks do not compile or run models.
+Activation rejects presets whose status is not `Supported`, including missing effects.
+The client localizes `status`; `diagnostic` is only for support reports.
+The client shows the reason without sending an activation request. An activation
+rejected after a state change returns the same structured compatibility object.
 
 ## Change state
 

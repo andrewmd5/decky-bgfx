@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { ButtonItem, DropdownItem, Field, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
-import { EffectEntry, Parameter, Target, store } from "./ipc";
+import { EffectEntry, NumericParameter, Target, store } from "./ipc";
 
 const scalingOptions = [
   { data: "auto", label: "Automatic" }, { data: "integer", label: "Integer" },
   { data: "fit", label: "Fit" }, { data: "stretch", label: "Stretch" }, { data: "fill", label: "Fill" },
 ];
-const labeledOptions = (param: Parameter) => (param.labels ?? []).map((label, i) => ({
+const labeledOptions = (param: NumericParameter) => (param.labels ?? []).map((label, i) => ({
   label, data: param.min + i * param.step,
 }));
 
@@ -27,7 +27,7 @@ function useLiveValue<T>(value: T, submit: (value: T) => Promise<boolean>, disab
 }
 
 function ParameterControl({ param, index, target, disabled }: {
-  param: Parameter; index: number; target: Target; disabled: boolean;
+  param: NumericParameter; index: number; target: Target; disabled: boolean;
 }) {
   const [value, change] = useLiveValue(Number(param.value), value =>
     store.setValue(target, { cmd: "set_param", args: { effect: index, name: param.name, value } }), disabled);

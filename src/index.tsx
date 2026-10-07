@@ -3,13 +3,28 @@ import { ButtonItem, DropdownItem, Field, ModalRoot, PanelSection, PanelSectionR
 import { definePlugin, useQuickAccessVisible } from "@decky/api";
 import { FaMagic } from "react-icons/fa";
 import { EffectControls, HudControl } from "./EffectControls";
-import { State, store, targetOf } from "./ipc";
+import { Compatibility, State, compatibilityDetail, compatibilityLabel, store, targetOf } from "./ipc";
+
+function PresetNotice({ name, support, closeModal }: {
+  name: string; support: Compatibility; closeModal?: () => void;
+}) {
+  return <ModalRoot onCancel={closeModal} closeModal={closeModal}>
+    <PanelSection title={name}>
+      <PanelSectionRow><Field label={compatibilityLabel(support)} description={compatibilityDetail(support)} /></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" onClick={closeModal}>Done</ButtonItem></PanelSectionRow>
+    </PanelSection>
+  </ModalRoot>;
+}
 
 function Diagnostics({ data, error, closeModal }: { data: State; error: string; closeModal?: () => void }) {
   const [copyResult, setCopyResult] = useState("");
   const report = [
     "BGFX Decky status", `App: ${data.app_id || "non-Steam"} · PID: ${data.pid}`,
     `IPC: ${data.protocol} · Preset: ${data.active?.name ?? "None"}`,
+    `Renderer: ${data.presentation?.path ?? "Unknown"} · Session: ${data.session}`,
+    `GPU checked: ${data.compatibility_adapter || "Pending"}`,
+    ...(data.active ? [`Preset support: ${compatibilityLabel(data.active.compatibility)}`,
+      data.active.compatibility.diagnostic] : []),
     `State: ${data.status.state}`, data.status.reason ?? "", error,
     `Source: ${data.status.source_fps} FPS · Generated: ${data.status.generated_fps} FPS`,
     `Submitted: ${data.status.submitted_fps} FPS · Failed presents: ${data.status.failed_presents}`,
@@ -40,12 +55,13 @@ function Content() {
   const data = view.data;
   const active = data?.active;
   const status = data?.status;
-  const blocked = !view.connected || status?.state === "compiling" || !!data?.requested_preset;
+  const blocked = !view.connected || !!data?.stale || status?.state === "compiling" || !!data?.requested_preset;
   const target = data ? targetOf(data) : null;
   const message = view.error || (data?.requested_preset ? `Loading ${data.requested_preset}…`
     : status?.state === "error" ? status.reason || "Effect error. Open Diagnostics."
     : status?.state === "compiling"
       ? `Preparing ${status.effect || "effects"}${status.pass_count ? ` · ${status.pass}/${status.pass_count}` : ""}`
+    : data?.stale ? "Waiting for the game to resume. Controls are temporarily unavailable."
     : view.notice);
   const fps = (value: number) => !view.connected || data?.stale || !Number.isFinite(value)
     ? "—" : Math.max(0, Math.round(value)).toString();
@@ -56,7 +72,7 @@ function Content() {
         <DropdownItem label="Game" selectedOption={data?.game}
           strDefaultLabel="Select a running game"
           rgOptions={view.sessions.map(session => ({
-            data: session.game, label: `${session.app_id ? `App ${session.app_id}` : "Game"} · PID ${session.pid}`,
+            data: session.game, label: session.app_id ? `App ${session.app_id}` : `Game · PID ${session.pid}`,
           }))} onChange={option => void store.select(option.data)} />
       </PanelSectionRow>}
       {!data ? <>
@@ -83,16 +99,29 @@ function Content() {
         <PanelSectionRow><DropdownItem label="Active preset"
           disabled={blocked} selectedOption={active?.index} strDefaultLabel="Choose a preset"
           rgOptions={data.presets.map(preset => ({
-            data: preset.index, label: `${preset.is_favorite ? "★ " : ""}${preset.name}`,
+            data: preset.index,
+            label: `${preset.is_favorite ? "★ " : ""}${preset.name}${preset.compatibility.status === "Supported"
+              ? "" : ` · ${compatibilityLabel(preset.compatibility)}`}`,
           }))}
-          onChange={option => void store.edit(target, [{ cmd: "activate", args: { index: option.data } }])} />
+          onChange={option => {
+            const preset = data.presets.find(item => item.index === option.data);
+            if (!preset) return;
+            if (preset.compatibility.status !== "Supported") {
+              showModal(<PresetNotice name={preset.name} support={preset.compatibility} />);
+              return;
+            }
+            void store.edit(target, [{ cmd: "activate", args: { index: preset.index } }]);
+          }} />
         </PanelSectionRow>
+        {active && active.compatibility.status !== "Supported" && <PanelSectionRow>
+          <Field label={compatibilityLabel(active.compatibility)} description={compatibilityDetail(active.compatibility)} />
+        </PanelSectionRow>}
         {active && <PanelSectionRow>
-          <HudControl key={`${data.game}:${active.name}`} value={active.show_hud} target={target} disabled={blocked} />
+          <HudControl key={`${data.session}:${active.token}`} value={active.show_hud} target={target} disabled={blocked} />
         </PanelSectionRow>}
       </PanelSection>
       {active?.effects.map((effect, index) => <EffectControls
-        key={`${data.game}:${active.name}:${index}:${effect.name}`}
+        key={`${data.session}:${active.token}:${index}:${effect.name}`}
         effect={effect} index={index} target={target} disabled={blocked} />)}
       <PanelSection>
         <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !active}

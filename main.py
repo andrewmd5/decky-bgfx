@@ -1,6 +1,7 @@
 import asyncio
 import glob
 import json
+import math
 import os
 import re
 import time
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 
 import decky
 
-PROTOCOL = 2
+PROTOCOL = 4
 MAX_RESPONSE_BYTES = 512 * 1024
 COMMAND_TIMEOUT = 3.0
 DISCOVERY_INTERVAL = 3.0
@@ -19,15 +20,30 @@ def process_key(pid: int) -> str | None:
     try:
         with open(f"/proc/{pid}/stat") as stat:
             fields = stat.read().rpartition(")")[2].split()
+        if fields[0] in {"Z", "X"}:
+            return None
         return f"{pid}:{fields[19]}"
     except (OSError, IndexError):
         return None
 
 
+def validate_snapshot(state: dict, pid: int):
+    if (state.get("ok") is not True or type(state.get("pid")) is not int
+            or state["pid"] != pid or not isinstance(state.get("session"), str)
+            or not state["session"] or type(state.get("updated_at")) not in (int, float)
+            or not math.isfinite(state["updated_at"]) or state["updated_at"] <= 0):
+        raise ValueError("Invalid BGFX session identity or timestamp.")
+    presentation = state.get("presentation")
+    if (not isinstance(presentation, dict)
+            or presentation.get("path") not in {"application", "capture"}
+            or type(presentation.get("has_presented")) is not bool):
+        raise ValueError("Invalid BGFX presentation state.")
+
+
 @dataclass
 class Endpoint:
     path: str
-    game: str
+    process: str
     state: dict
     reachable: bool = True
 
@@ -35,15 +51,23 @@ class Endpoint:
     def session(self):
         return self.state["session"]
 
+    @property
+    def game(self):
+        app_id = self.state.get("app_id")
+        if isinstance(app_id, str) and app_id.isdecimal() and int(app_id) > 0:
+            return f"app:{app_id}"
+        return self.process
+
     def info(self):
-        return {"game": self.game, **{
+        return {"game": self.game, "presentation": self.state.get("presentation"), **{
             key: self.state.get(key) for key in ("session", "pid", "app_id")
         }}
 
     def rank(self, preferred=False):
         fresh = time.time() * 1000 - self.state["updated_at"] <= SNAPSHOT_MAX_AGE_MS
         presented = self.state.get("presentation", {}).get("has_presented", False)
-        return self.reachable, fresh and presented, presented, fresh, preferred
+        direct = self.state.get("presentation", {}).get("path") == "application"
+        return self.reachable, fresh and presented, presented, fresh, direct, preferred
 
 
 class Plugin:
@@ -51,6 +75,7 @@ class Plugin:
         self._lock = asyncio.Lock()
         self._endpoints = {}
         self._games = {}
+        self._incompatible_protocols = set()
         self._last_discovery = 0.0
         self._closed = False
         decky.logger.info("BGFX plugin loaded")
@@ -59,6 +84,7 @@ class Plugin:
         self._closed = True
         self._endpoints.clear()
         self._games.clear()
+        self._incompatible_protocols.clear()
 
     async def _uninstall(self):
         await self._unload()
@@ -87,6 +113,7 @@ class Plugin:
 
     async def _discover(self):
         self._last_discovery = time.monotonic()
+        self._incompatible_protocols.clear()
         candidates = []
         for path in glob.glob("/tmp/bgfx-overlay-*.sock"):
             match = re.fullmatch(r"bgfx-overlay-(\d+)(?:-[0-9a-f]+)?\.sock", os.path.basename(path))
@@ -109,15 +136,20 @@ class Plugin:
             async with gate:
                 try:
                     result = await self._exchange(path, {"cmd": "state"}, timeout=0.75)
-                    if (result.get("ok") and result.get("protocol") == PROTOCOL
-                            and result.get("pid") == pid and isinstance(result.get("session"), str)
-                            and isinstance(result.get("updated_at"), (int, float))
-                            and process_key(pid) == game):
+                    if result.get("ok") and process_key(pid) == game:
+                        protocol = result.get("protocol")
+                        if protocol != PROTOCOL:
+                            if type(protocol) is int:
+                                self._incompatible_protocols.add(protocol)
+                            return None
+                        validate_snapshot(result, pid)
                         return Endpoint(path, game, result)
-                except (OSError, ValueError, TimeoutError, KeyError):
+                except ValueError:
+                    return None
+                except (OSError, TimeoutError, KeyError):
                     pass
                 cached = previous.get(path)
-                if cached and cached.game == game and os.path.exists(path):
+                if cached and cached.process == game and os.path.exists(path):
                     cached.reachable = False
                     return cached
                 return None
@@ -140,6 +172,8 @@ class Plugin:
         if game in self._games:
             return self._endpoints[self._games[game]]
         if game:
+            if game.startswith("app:"):
+                return None
             pid = game.partition(":")[0]
             if pid.isdecimal() and process_key(int(pid)) == game:
                 return None
@@ -157,9 +191,11 @@ class Plugin:
                     game = entry.game
                     try:
                         result = await self._exchange(entry.path, {"cmd": "state"})
+                        validate_snapshot(result, entry.state["pid"])
                         if (not result.get("ok") or result.get("session") != entry.session
                                 or result.get("protocol") != PROTOCOL
-                                or process_key(result["pid"]) != game):
+                                or result.get("pid") != entry.state["pid"]
+                                or process_key(result["pid"]) != entry.process):
                             raise ValueError("Session changed")
                         entry.state = result
                         entry.reachable = True
@@ -171,6 +207,11 @@ class Plugin:
                     await self._discover()
             pid = game.partition(":")[0] if game else ""
             reconnecting = bool(pid.isdecimal() and process_key(int(pid)) == game)
+            if self._incompatible_protocols:
+                versions = ", ".join(str(version) for version in sorted(self._incompatible_protocols))
+                return {"ok": False, "sessions": self._session_list(), "reconnecting": False,
+                        "error": f"BGFX is running with protocol {versions}, but this plugin requires "
+                                 f"protocol {PROTOCOL}. Update BGFX and the Decky plugin together."}
             return {"ok": False, "sessions": self._session_list(), "reconnecting": reconnecting,
                     "error": "Reconnecting…" if reconnecting else "No BGFX game session detected."}
 
@@ -182,7 +223,7 @@ class Plugin:
             entry = self._endpoints.get(session)
             if self._closed or entry is None:
                 return {"ok": False, "error": "Game session ended. Refresh before editing."}
-            if self._games.get(entry.game) != session or process_key(entry.state["pid"]) != entry.game:
+            if self._games.get(entry.game) != session or process_key(entry.state["pid"]) != entry.process:
                 return {"ok": False, "error": "The game changed its renderer. Try the control again."}
             request = {**(args or {}), "cmd": cmd, "session": session, "preset": preset}
             try:

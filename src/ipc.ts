@@ -1,18 +1,27 @@
 import { callable } from "@decky/api";
+import { compatibilityMessages } from "./locales/en";
 
-export interface Result { ok: boolean; error?: string }
-export interface Parameter {
+export interface Result { ok: boolean; error?: string; compatibility?: Compatibility }
+interface ParameterBase {
   name: string;
   label: string;
   description: string;
-  type: "float" | "int" | "bool" | "texture";
-  value: number | string;
-  default: number | string;
+}
+export interface NumericParameter extends ParameterBase {
+  type: "float" | "int" | "bool";
+  value: number;
+  default: number;
   min: number;
   max: number;
   step: number;
   labels: string[];
 }
+export interface TextureParameter extends ParameterBase {
+  type: "texture";
+  value: string;
+  default: string;
+}
+export type Parameter = NumericParameter | TextureParameter;
 export interface EffectEntry {
   name: string;
   can_scale: boolean;
@@ -20,7 +29,23 @@ export interface EffectEntry {
   multiplier_parameter?: string;
   params: Parameter[];
 }
-export interface Session { game: string; session: string; pid: number; app_id?: string }
+export interface Session {
+  game: string; session: string; pid: number; app_id?: string;
+  presentation?: { path: "application" | "capture"; surface: string; has_presented: boolean };
+}
+export interface Compatibility {
+  status: keyof typeof compatibilityMessages;
+  effect: string;
+  diagnostic: string;
+}
+export const compatibilityLabel = (support: Compatibility): string =>
+  compatibilityMessages[support.status]?.label ?? "Unknown compatibility status";
+export const compatibilityDetail = (support: Compatibility): string => {
+  const message = compatibilityMessages[support.status]?.description
+    ?? "Update BGFX and the Decky plugin together.";
+  if (!message) return "";
+  return support.effect ? `${support.effect}: ${message}` : message;
+};
 export interface State extends Result, Session {
   protocol: number;
   stale: boolean;
@@ -29,8 +54,11 @@ export interface State extends Result, Session {
   sessions: Session[];
   requested_preset?: string;
   dirty: boolean;
-  presets: { name: string; description: string; index: number; is_favorite: boolean; chain_count: number }[];
-  active: { token: number; index: number; name: string; show_hud: boolean; effects: EffectEntry[] } | null;
+  compatibility_adapter: string;
+  presets: { name: string; description: string; index: number; is_favorite: boolean; chain_count: number;
+    compatibility: Compatibility }[];
+  active: { token: number; index: number; name: string; show_hud: boolean; effects: EffectEntry[];
+    compatibility: Compatibility } | null;
   status: {
     state: string; reason?: string; frame_generation: boolean; multiplier: number;
     source_fps: number; generated_fps: number; submitted_fps: number; failed_presents: number;
@@ -90,7 +118,9 @@ class SessionStore {
           connecting: !!data.reconnecting, connected: false });
         return;
       }
-      if (data.session !== this.view.data?.session) this.pendingValues.clear();
+      if (data.session !== this.view.data?.session || data.active?.token !== this.view.data?.active?.token) {
+        this.pendingValues.clear();
+      }
       this.selected = data.game;
       this.update({ data, sessions: data.sessions, connecting: false, connected: true,
         ...(this.connectionError ? { error: "" } : {}) });
@@ -137,7 +167,7 @@ class SessionStore {
   };
   private async applyEdits(target: Target, edits: Edit[], notice = ""): Promise<boolean> {
     const data = this.view.data;
-    if (this.stopped || !this.view.connected) return false;
+    if (this.stopped || !this.view.connected || data?.stale) return false;
     if (!data || data.session !== target.session || (data.active?.token ?? 0) !== target.preset) {
       this.update({ error: "Game or preset changed. Reopen its controls." });
       return false;
@@ -147,7 +177,9 @@ class SessionStore {
     try {
       for (const edit of edits) {
         const result = await command(target.session, target.preset, edit.cmd, edit.args ?? {});
-        if (!result.ok) throw new Error(result.error ?? "The game did not apply the change.");
+        if (!result.ok) throw new Error(result.compatibility
+          ? compatibilityDetail(result.compatibility) || compatibilityLabel(result.compatibility)
+          : result.error ?? "The game did not apply the change.");
       }
       this.update({ notice });
       await this.read();
