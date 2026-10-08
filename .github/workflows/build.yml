@@ -34,6 +34,7 @@ jobs:
       - name: Validate
         run: |
           pnpm check
+          pnpm test
           python -m py_compile main.py
           python -m unittest discover -s tests -v
       - name: Validate release tag
