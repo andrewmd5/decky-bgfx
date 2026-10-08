@@ -54,9 +54,9 @@ export interface State extends Result, Session {
   requested_preset?: string;
   dirty: boolean;
   compatibility_adapter: string;
-  presets: { name: string; description: string; index: number; is_favorite: boolean; chain_count: number;
+  presets: { name: string; path: string; description: string; index: number; is_favorite: boolean; chain_count: number;
     compatibility: Compatibility }[];
-  active: { token: number; index: number; name: string; show_hud: boolean; effects: EffectEntry[];
+  active: { token: number; index: number; name: string; path: string; show_hud: boolean; effects: EffectEntry[];
     compatibility: Compatibility } | null;
   status: {
     state: string; reason?: string; frame_generation: boolean; multiplier: number;

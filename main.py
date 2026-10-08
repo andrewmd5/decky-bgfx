@@ -14,6 +14,7 @@ MAX_RESPONSE_BYTES = 512 * 1024
 COMMAND_TIMEOUT = 3.0
 DISCOVERY_INTERVAL = 3.0
 SNAPSHOT_MAX_AGE_MS = 3000
+SNAPSHOT_REFRESH_DELAY = 0.1
 
 
 def process_key(pid: int) -> str | None:
@@ -63,11 +64,12 @@ class Endpoint:
             key: self.state.get(key) for key in ("session", "pid", "app_id")
         }}
 
-    def rank(self, preferred=False):
-        fresh = time.time() * 1000 - self.state["updated_at"] <= SNAPSHOT_MAX_AGE_MS
+    def rank(self, now, preferred=False):
+        fresh = now - self.state["updated_at"] <= SNAPSHOT_MAX_AGE_MS
         presented = self.state.get("presentation", {}).get("has_presented", False)
         direct = self.state.get("presentation", {}).get("path") == "application"
-        return self.reachable, fresh and presented, presented, fresh, direct, preferred
+        last_update = 0 if fresh else self.state["updated_at"]
+        return self.reachable, fresh and presented, presented, fresh, last_update, direct, preferred
 
 
 class Plugin:
@@ -135,7 +137,7 @@ class Plugin:
         async def probe(path, pid, game):
             async with gate:
                 try:
-                    result = await self._exchange(path, {"cmd": "state"}, timeout=0.75)
+                    result = await self._read_snapshot(path, pid, timeout=0.75)
                     if result.get("ok") and process_key(pid) == game:
                         protocol = result.get("protocol")
                         if protocol != PROTOCOL:
@@ -157,13 +159,26 @@ class Plugin:
         results = await asyncio.gather(*(probe(path, pid, game) for _, path, pid, game in candidates[:32]))
         self._endpoints = {entry.session: entry for entry in results if entry is not None}
         games = {}
+        now = time.time() * 1000
         for entry in self._endpoints.values():
             current = games.get(entry.game)
             preferred = self._games.get(entry.game)
-            if current is None or entry.rank(entry.session == preferred) > current.rank(current.session == preferred):
+            if current is None or entry.rank(now, entry.session == preferred) > current.rank(now, current.session == preferred):
                 games[entry.game] = entry
         self._games = {game: entry.session for game, entry in games.items()}
         return bool(candidates)
+
+    async def _read_snapshot(self, path: str, pid: int, timeout=COMMAND_TIMEOUT):
+        async with asyncio.timeout(timeout):
+            result = await self._exchange(path, {"cmd": "state"}, timeout=timeout)
+            if result.get("ok") and result.get("protocol") == PROTOCOL:
+                validate_snapshot(result, pid)
+                if time.time() * 1000 - result["updated_at"] > SNAPSHOT_MAX_AGE_MS:
+                    # A read requests a snapshot at the next render boundary and returns
+                    # the previous one. Give that request time to reach the renderer.
+                    await asyncio.sleep(SNAPSHOT_REFRESH_DELAY)
+                    result = await self._exchange(path, {"cmd": "state"}, timeout=timeout)
+            return result
 
     def _session_list(self):
         return [self._endpoints[session].info() for session in self._games.values()]
@@ -190,7 +205,7 @@ class Plugin:
                 if entry is not None:
                     game = entry.game
                     try:
-                        result = await self._exchange(entry.path, {"cmd": "state"})
+                        result = await self._read_snapshot(entry.path, entry.state["pid"])
                         validate_snapshot(result, entry.state["pid"])
                         if (not result.get("ok") or result.get("session") != entry.session
                                 or result.get("protocol") != PROTOCOL

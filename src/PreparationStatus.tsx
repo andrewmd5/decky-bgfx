@@ -38,11 +38,9 @@ export function PreparationStatus({ view }: { view: ViewState }) {
     }
   }
   if (data?.stale) {
-    description = "Close Quick Access to let the game continue.";
+    description = "Waiting for the active renderer to update its status.";
     progress = undefined;
-    if (!busy) {
-      title = "Game paused";
-    }
+    title = "Waiting for game status";
   }
   if (!view.connected) {
     title = "Reconnecting…";

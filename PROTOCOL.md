@@ -17,15 +17,18 @@ an `error` string or a structured `compatibility` rejection.
 Returns one snapshot containing:
 
 - `protocol`, `session`, `pid`, `app_id`, `updated_at` (Unix milliseconds)
-- `presets`: index, name, description, favorite flag, chain count, compatibility
-- `active`: preset token/index/name, `show_hud`, effects, parameters, compatibility
+- `presets`: index, name, path, description, favorite flag, chain count, compatibility
+- `active`: preset token/index/name/path, `show_hud`, effects, parameters, compatibility
 - `compatibility_adapter`: name of the GPU used for compatibility checks
 - `requested_preset`: pending preset name, or null
 - `status`: state/reason, multiplier, frame rates, failed presents, resolution, compilation progress
 
 States: `compiling`, `error`, `waiting`, `generating`, `active`, `passthrough`.
 Frame rates count source arrivals and successful generated/total present submissions,
-not display scanout. The timestamp stops advancing if the game stops presenting.
+not display scanout. A state request returns the cached snapshot and requests an
+update at the next render boundary. Its timestamp is not a game pause signal.
+If it is stale, the client allows a short refresh interval before choosing between
+renderers. Older inactive swapchains must not hide a renderer with newer activity.
 
 Effects include `can_scale`, `scaling`, and `multiplier_parameter`. Numeric parameters
 include value, default, min, max, step, and optional `labels` in step order.
@@ -64,6 +67,9 @@ acknowledges the request; poll state for preparation or errors. Commands that
 expire before execution are discarded. A timeout after execution starts is
 indeterminate: refresh before retrying. Save writes an atomic snapshot off the
 presentation thread, retaining the shipped filename for user overrides.
+An accepted activation may recreate the swapchain and its IPC session. Follow
+the same game's preparation and confirm readiness using the preset path; preset
+indexes and tokens are local to a renderer's catalogue. Do not resend the write.
 
 The plugin serializes requests, bounds socket waits/responses, and does not
 automatically retry writes. A paused game may need to resume before accepting edits.

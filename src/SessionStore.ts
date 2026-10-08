@@ -11,6 +11,8 @@ export interface SessionTransport {
 export interface PresetActivation {
   phase: "sending" | "preparing";
   session: string;
+  game: string;
+  path: string;
   index: number;
   name: string;
   after: number;
@@ -71,24 +73,25 @@ export class SessionStore {
         this.connectionError = true;
         if (!data.reconnecting) this.selected = null;
         this.update({ data: data.reconnecting ? this.view.data : null,
-          activation: null, sessions: data.sessions ?? [], error: data.error ?? "Connection unavailable.",
+          activation: data.reconnecting ? this.view.activation : null,
+          sessions: data.sessions ?? [], error: data.error ?? "Connection unavailable.",
           connecting: !!data.reconnecting, connected: false });
         return;
       }
-      if (data.session !== this.view.data?.session || data.active?.token !== this.view.data?.active?.token) {
+      const identityChanged = data.session !== this.view.data?.session ||
+        data.active?.token !== this.view.data?.active?.token;
+      if (identityChanged) {
         this.pendingValues.clear();
-        if (!this.view.activation) {
-          this.update({ notice: "" });
-        }
       }
-      this.reconcileActivation(data);
       this.selected = data.game;
       this.update({ data, sessions: data.sessions, connecting: false, connected: true,
-        ...(this.connectionError ? { error: "" } : {}) });
+        ...(identityChanged ? { notice: "", error: "" } : {}),
+        ...(this.connectionError ? { error: "" } : {}),
+        ...this.reconcileActivation(data) });
       this.connectionError = false;
     } catch (error) {
       this.connectionError = true;
-      this.update({ activation: null, error: String(error), connecting: true, connected: false });
+      this.update({ error: String(error), connecting: true, connected: false });
     }
   }
   refresh = (): Promise<void> => {
@@ -129,48 +132,51 @@ export class SessionStore {
 
     const activation: PresetActivation = {
       phase: "sending", session: target.session, index, name: preset.name,
-      after: data.updated_at,
+      game: data.game, path: preset.path, after: data.updated_at,
     };
     this.pendingValues.clear();
     this.update({ activation, error: "", notice: "" });
     return this.enqueue(async () => {
-      const accepted = await this.applyEdits(target, [{ cmd: "activate", args: { index } }]);
+      const accepted = await this.sendEdits(target, [{ cmd: "activate", args: { index } }]);
       if (this.view.activation === activation) {
         if (accepted) {
           this.update({ activation: { ...activation, phase: "preparing" } });
-          await this.read();
         } else {
           this.update({ activation: null });
         }
       }
+      await this.read();
       return accepted;
     });
   };
 
-  private reconcileActivation(data: State) {
+  private reconcileActivation(data: State): Partial<ViewState> {
     const activation = this.view.activation;
     if (!activation) {
-      return;
+      return {};
     }
-    if (data.session !== activation.session) {
-      this.update({ activation: null, notice: "", error: "The game changed its renderer. Check the active preset." });
-      return;
+    if (data.game !== activation.game) {
+      return { activation: null, notice: "", error: "" };
     }
     if (activation.phase === "sending" || data.stale || data.updated_at <= activation.after) {
-      return;
+      return {};
     }
     if (data.status.state === "error") {
-      this.update({ activation: null, notice: "", error: data.status.reason || "Could not prepare the preset." });
-      return;
+      // Runtime failures belong to the current snapshot, not a persistent command error.
+      return { activation: null, notice: "", error: "" };
     }
     if (data.requested_preset || data.status.state === "compiling") {
-      return;
+      const preset = data.presets.find(item => item.path === activation.path);
+      return { activation: { ...activation, session: data.session, index: preset?.index ?? activation.index } };
     }
-    if (data.active?.index === activation.index) {
-      this.update({ activation: null, notice: `${activation.name} is ready` });
-    } else if (data.active?.token !== this.view.data?.active?.token) {
-      this.update({ activation: null, notice: "", error: "The active preset changed elsewhere." });
+    if (data.active?.path === activation.path) {
+      return { activation: null, notice: `${activation.name} is ready`, error: "" };
     }
+    if (data.session !== activation.session || data.active?.token !== this.view.data?.active?.token ||
+        this.view.data?.status.state === "compiling" || this.view.data?.requested_preset) {
+      return { activation: null, notice: "Active preset changed", error: "" };
+    }
+    return {};
   }
 
   setValue = (target: Target, edit: Edit): Promise<boolean> => {
@@ -195,6 +201,14 @@ export class SessionStore {
     return this.enqueue(() => this.applyEdits(target, edits, notice));
   };
   private async applyEdits(target: Target, edits: Edit[], notice = ""): Promise<boolean> {
+    const accepted = await this.sendEdits(target, edits);
+    if (accepted) {
+      this.update({ notice });
+    }
+    await this.read();
+    return accepted;
+  }
+  private async sendEdits(target: Target, edits: Edit[]): Promise<boolean> {
     const data = this.view.data;
     if (this.stopped || !this.view.connected || data?.stale) return false;
     if (!data || data.session !== target.session || (data.active?.token ?? 0) !== target.preset) {
@@ -210,12 +224,9 @@ export class SessionStore {
           ? compatibilityDetail(result.compatibility) || compatibilityLabel(result.compatibility)
           : result.error ?? "The game did not apply the change.");
       }
-      this.update({ notice });
-      await this.read();
       return true;
     } catch (error) {
       this.update({ error: error instanceof Error ? error.message : String(error) });
-      await this.read();
       return false;
     }
   }

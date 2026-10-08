@@ -9,10 +9,10 @@ function snapshot(): State {
     ok: true, protocol: 4, session: "renderer", pid: 1, app_id: "123", game: "app:123",
     stale: false, updated_at: 100, sessions: [], dirty: false, compatibility_adapter: "GPU",
     presets: [0, 1].map(index => ({
-      index, name: index === 0 ? "Original" : "New preset", description: "",
+      index, name: index === 0 ? "Original" : "New preset", path: `${index}.bgfxp`, description: "",
       is_favorite: false, chain_count: 1, compatibility: supported,
     })),
-    active: { token: 1, index: 0, name: "Original", effects: [], show_hud: false, compatibility: supported },
+    active: { token: 1, index: 0, name: "Original", path: "0.bgfxp", effects: [], show_hud: false, compatibility: supported },
     status: {
       state: "active", frame_generation: false, multiplier: 1, source_fps: 60, generated_fps: 0,
       submitted_fps: 60, failed_presents: 0, width: 1280, height: 800, effect: "", pass: 0, pass_count: 0,
@@ -44,7 +44,7 @@ async function setup() {
       state.updated_at++;
       state.requested_preset = undefined;
       state.status.state = "active";
-      state.active = { ...state.active!, token: 2, index: 1, name: "New preset" };
+      state.active = { ...state.active!, token: 2, index: 1, name: "New preset", path: "1.bgfxp" };
     },
   };
 }
@@ -114,8 +114,13 @@ test("compilation failure ends preparation without announcing readiness", async 
   h.state().status.reason = "Pipeline creation failed";
   await h.store.refresh();
   assert.equal(h.store.snapshot().activation, null);
-  assert.equal(h.store.snapshot().error, "Pipeline creation failed");
+  assert.equal(h.store.snapshot().error, "");
+  assert.equal(h.store.snapshot().data?.status.reason, "Pipeline creation failed");
   assert.equal(h.store.snapshot().notice, "");
+  h.ready();
+  await h.store.refresh();
+  assert.equal(h.store.snapshot().error, "");
+  assert.equal(h.store.snapshot().data?.status.state, "active");
 });
 
 test("a previous error snapshot does not fail a new request", async () => {
@@ -131,14 +136,118 @@ test("a previous error snapshot does not fail a new request", async () => {
   assert.equal(h.store.snapshot().notice, "New preset is ready");
 });
 
-test("renderer replacement releases controls without replaying the command", async () => {
+test("a different preset on a replacement renderer is a state change, not a failed command", async () => {
   const h = await setup();
   await h.store.activate(h.target, 1);
-  h.setState({ ...snapshot(), session: "replacement" });
+  h.setState({ ...snapshot(), session: "replacement", updated_at: 101 });
   await h.store.refresh();
   assert.equal(h.store.snapshot().activation, null);
-  assert.match(h.store.snapshot().error, /changed its renderer/);
+  assert.equal(h.store.snapshot().error, "");
+  assert.equal(h.store.snapshot().notice, "Active preset changed");
   assert.equal(h.calls(), 1);
+});
+
+test("accepted activation follows swapchain replacement through compilation to readiness", async () => {
+  const h = await setup();
+  await h.store.activate(h.target, 1);
+  h.state().session = "replacement";
+  h.state().updated_at++;
+  h.state().status.state = "compiling";
+  await h.store.refresh();
+  assert.equal(h.store.snapshot().activation?.phase, "preparing");
+  assert.equal(h.store.snapshot().activation?.session, "replacement");
+  assert.equal(h.store.snapshot().error, "");
+  h.ready();
+  await h.store.refresh();
+  assert.equal(h.store.snapshot().activation, null);
+  assert.equal(h.store.snapshot().notice, "New preset is ready");
+  assert.equal(h.store.snapshot().error, "");
+  assert.equal(h.calls(), 1);
+});
+
+test("replacement during command acknowledgement can confirm the requested preset", async () => {
+  const h = await setup();
+  const response = deferred<Result>();
+  h.reply(response.promise);
+  const applying = h.store.activate(h.target, 1);
+  await Promise.resolve();
+  h.ready();
+  h.state().session = "replacement";
+  response.resolve({ ok: true });
+  assert.equal(await applying, true);
+  assert.equal(h.store.snapshot().activation, null);
+  assert.equal(h.store.snapshot().notice, "New preset is ready");
+  assert.equal(h.store.snapshot().error, "");
+  assert.equal(h.calls(), 1);
+});
+
+test("preset paths survive a reordered catalogue on a replacement renderer", async () => {
+  const h = await setup();
+  await h.store.activate(h.target, 1);
+  h.ready();
+  h.state().session = "replacement";
+  h.state().presets.reverse();
+  h.state().presets.forEach((preset, index) => { preset.index = index; });
+  h.state().active!.index = 0;
+  await h.store.refresh();
+  assert.equal(h.store.snapshot().notice, "New preset is ready");
+  assert.equal(h.store.snapshot().activation, null);
+});
+
+test("an unrelated game cannot confirm an activation with the same preset path", async () => {
+  const h = await setup();
+  await h.store.activate(h.target, 1);
+  h.ready();
+  h.state().session = "other-game";
+  h.state().game = "app:456";
+  await h.store.refresh();
+  assert.equal(h.store.snapshot().activation, null);
+  assert.equal(h.store.snapshot().notice, "");
+  assert.equal(h.store.snapshot().error, "");
+});
+
+test("a superseding preparation on the new renderer does not leave the pending selection stuck", async () => {
+  const h = await setup();
+  await h.store.activate(h.target, 1);
+  h.state().session = "replacement";
+  h.state().updated_at++;
+  h.state().status.state = "compiling";
+  await h.store.refresh();
+  h.state().updated_at++;
+  h.state().status.state = "active";
+  await h.store.refresh();
+  assert.equal(h.store.snapshot().activation, null);
+  assert.equal(h.store.snapshot().notice, "Active preset changed");
+  assert.equal(h.store.snapshot().error, "");
+});
+
+test("temporary reconnection retains an accepted activation and clears its connection error on recovery", async () => {
+  const h = await setup();
+  await h.store.activate(h.target, 1);
+  h.state().ok = false;
+  h.state().reconnecting = true;
+  h.state().error = "Reconnecting…";
+  await h.store.refresh();
+  assert.ok(h.store.snapshot().activation);
+  h.state().ok = true;
+  h.ready();
+  h.state().session = "replacement";
+  await h.store.refresh();
+  assert.equal(h.store.snapshot().activation, null);
+  assert.equal(h.store.snapshot().notice, "New preset is ready");
+  assert.equal(h.store.snapshot().error, "");
+});
+
+test("a command error from an old session is cleared when the active renderer changes", async () => {
+  const h = await setup();
+  h.reply(Promise.resolve({ ok: false, error: "The game changed its renderer. Try the control again." }));
+  await h.store.activate(h.target, 1);
+  assert.ok(h.store.snapshot().error);
+  h.ready();
+  h.state().session = "replacement";
+  await h.store.refresh();
+  assert.equal(h.store.snapshot().error, "");
+  assert.equal(h.store.snapshot().data?.active?.path, "1.bgfxp");
 });
 
 test("repeated selection during preparation does not queue duplicate work", async () => {

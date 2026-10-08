@@ -96,6 +96,40 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
                                      self.renderer(124, "application", updated_at=1))
         self.assertEqual(self.plugin._select("app:19680").state["pid"], 123)
 
+    async def test_stale_discovery_refreshes_the_snapshot_requested_at_the_render_boundary(self):
+        stale = {**self.state, "updated_at": time.time() * 1000 - 10000}
+        responses = iter([stale, self.state, self.state])
+        self.plugin._exchange = AsyncMock(side_effect=lambda *args, **kwargs: dict(next(responses)))
+        result = await self.plugin.get_state()
+        self.assertFalse(result["stale"])
+        self.assertEqual(result["updated_at"], self.state["updated_at"])
+
+    async def test_title_screen_renderer_does_not_hide_the_newer_game_renderer(self):
+        old = self.renderer(123, "application", updated_at=time.time() * 1000 - 60000)
+        new = self.renderer(123, "application", session="abcdef01", updated_at=time.time() * 1000 - 4000)
+        self.plugin._games["app:19680"] = old["session"]
+        await self.discover_sessions(old, new)
+        self.assertEqual(self.plugin._select("app:19680").session, "abcdef01")
+
+    async def test_recent_capture_beats_an_older_direct_renderer_when_both_snapshots_are_stale(self):
+        await self.discover_sessions(
+            self.renderer(123, "application", updated_at=time.time() * 1000 - 60000),
+            self.renderer(124, "capture", updated_at=time.time() * 1000 - 4000))
+        self.assertEqual(self.plugin._select("app:19680").state["pid"], 124)
+
+    async def test_fresh_renderers_do_not_switch_due_to_small_snapshot_timing_differences(self):
+        old = self.renderer(123, "application")
+        new = self.renderer(123, "application", session="abcdef01", updated_at=time.time() * 1000 + 1)
+        self.plugin._games["app:19680"] = old["session"]
+        await self.discover_sessions(old, new)
+        self.assertEqual(self.plugin._select("app:19680").session, old["session"])
+
+    async def test_stopped_renderer_remains_stale_after_refresh(self):
+        self.state["updated_at"] = time.time() * 1000 - 60000
+        result = await self.plugin.get_state()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["stale"])
+
     async def test_separate_steam_games_remain_selectable(self):
         await self.discover_sessions(self.renderer(123, "application"),
                                      self.renderer(124, "application", app="730"))
