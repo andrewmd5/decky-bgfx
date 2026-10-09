@@ -28,6 +28,11 @@ export function PreparationStatus({ view }: { view: ViewState }) {
     }
   } else if (data?.status.state === "error") {
     error ||= data.status.reason || "Could not prepare the effects. Open Diagnostics for details.";
+  } else if (data?.status.effects_active === false) {
+    title = "Effects off";
+  } else if (data?.presentation?.last_effect_presented_at !== undefined &&
+      Date.now() - data.presentation.last_effect_presented_at >= 5000) {
+    title = "Connected, waiting for game frames";
   } else if (data?.status.state === "waiting") {
     title = "Waiting for game frames";
     description = data.status.reason || "Resume the game to continue.";

@@ -1,8 +1,18 @@
 # BGFX IPC v4
 
-Requires a BGFX build with IPC v4. Unix sockets are discovered at
-`/tmp/bgfx-overlay-{pid}-{session}.sock`. Each renderer has its own session ID;
-the socket is readable/writable only by the game user (and root).
+Requires a BGFX build with IPC v4. Current layers advertise one JSON record per
+renderer in `$XDG_DATA_HOME/borderless-gaming/sessions` (by default,
+`~/.local/share/borderless-gaming/sessions`). The registry uses PascalCase fields:
+`Pid`, `ProcessStart`, `BootId`, `Session`, `Endpoint`, `DataDirectory`, `Path`,
+`Surface`, `Window`, and `CaptureWindow`. Validate the boot and process start time,
+then connect to `Endpoint` and verify the returned session and PID. The endpoint
+lives beside its registry record, so discovery and IPC cross the same Steam runtime
+boundary. Long paths can be addressed through a local directory descriptor under
+`/proc/self/fd`. bg-holo and Decky both use this contract.
+
+`/tmp/bgfx-overlay-{pid}-{session}.sock` remains a compatibility alias for older
+clients; updated clients use it only as a fallback for older running games.
+Sockets and records are readable/writable only by the game user (and root).
 
 Requests and responses are newline-delimited JSON. Requests are limited to
 4096 bytes including the newline. Every response has `ok`; failures include
@@ -22,6 +32,13 @@ Returns one snapshot containing:
 - `compatibility_adapter`: name of the GPU used for compatibility checks
 - `requested_preset`: pending preset name, or null
 - `status`: state/reason, multiplier, frame rates, failed presents, resolution, compilation progress
+
+`presentation.last_presented_at` and `presentation.last_effect_presented_at` are
+Unix milliseconds of successful presentation, zero before the first success.
+`status.effects_active` reports whether an effect pipeline is installed. Together
+these distinguish a connected idle renderer from effects that are actually
+presenting. Snapshot age alone is not evidence that effects are running.
+These fields extend v4; clients retain support for older v4 snapshots.
 
 States: `compiling`, `error`, `waiting`, `generating`, `active`, `passthrough`.
 Frame rates count source arrivals and successful generated/total present submissions,

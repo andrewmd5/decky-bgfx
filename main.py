@@ -28,6 +28,50 @@ def process_key(pid: int) -> str | None:
         return None
 
 
+def session_directories():
+    home = getattr(decky, "DECKY_USER_HOME", None) or os.path.expanduser("~")
+    roots = {os.path.join(home, ".local", "share")}
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg and os.path.isabs(xdg):
+        roots.add(xdg)
+    return [os.path.join(root, "borderless-gaming", "sessions") for root in roots]
+
+
+def boot_id():
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as stream:
+            return stream.read().strip()
+    except OSError:
+        return ""
+
+
+def registered_endpoints():
+    # This is the engine's shared registry, also consumed by bg-holo. Steam can
+    # isolate /tmp while keeping the user's profile directory visible to both.
+    boot = boot_id()
+    if not boot:
+        return []
+    entries = []
+    for directory in session_directories():
+        for record in glob.glob(os.path.join(directory, "*.json")):
+            try:
+                with open(record) as stream:
+                    value = json.load(stream)
+                pid, start, session = value["Pid"], value["ProcessStart"], value["Session"]
+                if (type(pid) is not int or type(start) is not int or start <= 0
+                        or not isinstance(session, str) or not re.fullmatch(r"[0-9a-f]{32}", session)
+                        or value.get("BootId") != boot or value.get("DataDirectory") != os.path.dirname(directory)
+                        or value.get("Path") not in {"capture", "application"}):
+                    continue
+                path = os.path.join(directory, session + ".sock")
+                process = f"{pid}:{start}"
+                if value.get("Endpoint") == path and process_key(pid) == process:
+                    entries.append((os.stat(path).st_mtime_ns, path, pid, process, session))
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+    return entries
+
+
 def validate_snapshot(state: dict, pid: int):
     if (state.get("ok") is not True or type(state.get("pid")) is not int
             or state["pid"] != pid or not isinstance(state.get("session"), str)
@@ -39,6 +83,10 @@ def validate_snapshot(state: dict, pid: int):
             or presentation.get("path") not in {"application", "capture"}
             or type(presentation.get("has_presented")) is not bool):
         raise ValueError("Invalid BGFX presentation state.")
+    for key in ("last_presented_at", "last_effect_presented_at"):
+        if key in presentation and (type(presentation[key]) not in (int, float)
+                or not math.isfinite(presentation[key]) or presentation[key] < 0):
+            raise ValueError("Invalid BGFX presentation timestamp.")
 
 
 @dataclass
@@ -68,8 +116,16 @@ class Endpoint:
         fresh = now - self.state["updated_at"] <= SNAPSHOT_MAX_AGE_MS
         presented = self.state.get("presentation", {}).get("has_presented", False)
         direct = self.state.get("presentation", {}).get("path") == "application"
+        presentation = self.state.get("presentation", {})
+        if "last_presented_at" in presentation:
+            last_presented = presentation["last_presented_at"]
+            last_effect = presentation.get("last_effect_presented_at", 0)
+            rendering = (self.state.get("status", {}).get("effects_active") is True
+                         and last_effect > 0 and 0 <= now - last_effect < 5000)
+            live = last_presented > 0 and 0 <= now - last_presented < 5000
+            return self.reachable, rendering, live, presented, fresh, last_presented, direct, preferred
         last_update = 0 if fresh else self.state["updated_at"]
-        return self.reachable, fresh and presented, presented, fresh, last_update, direct, preferred
+        return self.reachable, fresh and presented, fresh and presented, presented, fresh, last_update, direct, preferred
 
 
 class Plugin:
@@ -93,9 +149,14 @@ class Plugin:
 
     async def _exchange(self, path: str, request: dict, timeout=COMMAND_TIMEOUT) -> dict:
         async with asyncio.timeout(timeout):
-            reader, writer = await asyncio.open_unix_connection(
-                path, limit=MAX_RESPONSE_BYTES
-            )
+            # Keep sockaddr_un short even with long home-directory paths. The
+            # descriptor belongs to this process, not the game's mount namespace.
+            directory = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                address = f"/proc/self/fd/{directory}/{os.path.basename(path)}"
+                reader, writer = await asyncio.open_unix_connection(address, limit=MAX_RESPONSE_BYTES)
+            finally:
+                os.close(directory)
             try:
                 payload = (json.dumps(request, allow_nan=False) + "\n").encode()
                 if len(payload) > 4096:
@@ -116,8 +177,11 @@ class Plugin:
     async def _discover(self):
         self._last_discovery = time.monotonic()
         self._incompatible_protocols.clear()
-        candidates = []
+        candidates = list(registered_endpoints())
+        known = {os.path.realpath(entry[1]) for entry in candidates}
         for path in glob.glob("/tmp/bgfx-overlay-*.sock"):
+            if os.path.realpath(path) in known:
+                continue
             match = re.fullmatch(r"bgfx-overlay-(\d+)(?:-[0-9a-f]+)?\.sock", os.path.basename(path))
             if match is None:
                 continue
@@ -126,7 +190,7 @@ class Plugin:
             if game is None:
                 continue
             try:
-                candidates.append((os.stat(path).st_mtime_ns, path, pid, game))
+                candidates.append((os.stat(path).st_mtime_ns, path, pid, game, None))
             except OSError:
                 continue
         candidates.sort(reverse=True)
@@ -134,7 +198,7 @@ class Plugin:
 
         previous = {entry.path: entry for entry in self._endpoints.values()}
 
-        async def probe(path, pid, game):
+        async def probe(path, pid, game, session):
             async with gate:
                 try:
                     result = await self._read_snapshot(path, pid, timeout=0.75)
@@ -145,6 +209,8 @@ class Plugin:
                                 self._incompatible_protocols.add(protocol)
                             return None
                         validate_snapshot(result, pid)
+                        if session is not None and result["session"] != session:
+                            raise ValueError("BGFX registry session changed.")
                         return Endpoint(path, game, result)
                 except ValueError:
                     return None
@@ -156,7 +222,7 @@ class Plugin:
                     return cached
                 return None
 
-        results = await asyncio.gather(*(probe(path, pid, game) for _, path, pid, game in candidates[:32]))
+        results = await asyncio.gather(*(probe(path, pid, game, session) for _, path, pid, game, session in candidates[:32]))
         self._endpoints = {entry.session: entry for entry in results if entry is not None}
         games = {}
         now = time.time() * 1000

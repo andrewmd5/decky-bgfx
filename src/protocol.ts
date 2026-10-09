@@ -30,7 +30,7 @@ export interface EffectEntry {
 }
 export interface Session {
   game: string; session: string; pid: number; app_id?: string;
-  presentation?: { path: "application" | "capture"; surface: string; has_presented: boolean };
+  presentation?: { path: "application" | "capture"; surface: string; has_presented: boolean; last_presented_at?: number; last_effect_presented_at?: number };
 }
 export interface Compatibility {
   status: keyof typeof compatibilityMessages;
@@ -59,7 +59,7 @@ export interface State extends Result, Session {
   active: { token: number; index: number; name: string; path: string; show_hud: boolean; effects: EffectEntry[];
     compatibility: Compatibility } | null;
   status: {
-    state: string; reason?: string; frame_generation: boolean; multiplier: number;
+    state: string; reason?: string; effects_active?: boolean; frame_generation: boolean; multiplier: number;
     source_fps: number; generated_fps: number; submitted_fps: number; failed_presents: number;
     width: number; height: number; effect: string; pass: number; pass_count: number;
   };

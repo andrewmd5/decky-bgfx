@@ -26,15 +26,40 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         }
         self.plugin._exchange = AsyncMock(side_effect=lambda *args, **kwargs: dict(self.state))
         for mock in (
+            patch("main.registered_endpoints", return_value=[]),
             patch("main.glob.glob", return_value=[self.path]),
             patch("main.process_key", return_value="123:456"),
             patch("main.os", types.SimpleNamespace(
                 stat=Mock(return_value=types.SimpleNamespace(st_mtime_ns=1)),
-                path=types.SimpleNamespace(basename=os.path.basename, exists=Mock(return_value=True)),
+                path=types.SimpleNamespace(basename=os.path.basename, realpath=os.path.realpath, exists=Mock(return_value=True)),
             )),
         ):
             mock.start()
             self.addCleanup(mock.stop)
+
+    async def test_advertised_endpoint_works_without_tmp_socket(self):
+        with patch("main.registered_endpoints", return_value=[(1, "/shared/session.sock", 123, "123:456", "abcdef")]), \
+                patch("main.glob.glob", return_value=[]):
+            result = await self.plugin.get_state()
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.plugin._select(None).path, "/shared/session.sock")
+
+    async def test_registry_identity_mismatch_is_rejected(self):
+        with patch("main.registered_endpoints", return_value=[(1, "/shared/session.sock", 123, "123:456", "replacement")]), \
+                patch("main.glob.glob", return_value=[]):
+            result = await self.plugin.get_state()
+        self.assertFalse(result["ok"])
+
+    async def test_presenting_replacement_beats_retired_effect_pipeline(self):
+        now = time.time() * 1000
+        old = self.renderer(123, "application", status={"effects_active": True},
+            presentation={"path": "application", "has_presented": True,
+                          "last_effect_presented_at": now - 10000, "last_presented_at": now - 10000})
+        new = self.renderer(123, "application", session="abcdef01", status={"effects_active": False},
+            presentation={"path": "application", "has_presented": True,
+                          "last_effect_presented_at": 0, "last_presented_at": now})
+        await self.discover_sessions(old, new)
+        self.assertEqual(self.plugin._select("app:19680").session, "abcdef01")
 
     async def test_current_runtime_is_discovered(self):
         self.assertEqual(PROTOCOL, 4)
